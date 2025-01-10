@@ -1,0 +1,968 @@
+---
+title: "Analysis for PC deletion"
+author: 
+  - "Richard Barfield"
+  - "Biostatistics, Epidemiology and Research Design (BERD) Core"
+  - "Center for Human Systems Immunology (CHSI)"
+date: "`r  Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F,message = F,warning = F)
+```
+
+```{r Baseinfo,eval=FALSE}
+#General info ----------------------
+#
+# Created: 2025-01-08
+#
+# Author: Richard Barfield
+#
+# Program: 00_PC_cmv_analyses
+# Description: Analyzing the PC intact immunocompetent data. Calculating the AUC. 
+#--- --- --- --- --- --- --- --- --- --- --- --- --- 
+#--- --- --- --- --- --- --- --- --- --- --- --- --- 
+``` 
+
+```{r libs,message=FALSE, warning=FALSE, include=F, results='asis'}
+
+
+library(openxlsx)
+library(readxl)
+library(Hmisc)
+library(coin)
+
+library(knitr)
+library(drc)
+library(lmerTest)
+library(lme4)
+library(lmec)
+library(DescTools)
+library(lubridate)
+library(kableExtra)
+library(tidyverse)
+
+```
+
+# Introduction
+
+Here we are analyzing two different sets of data.
+
+-   The first is the Immunocompetent dams comparing PC deleted to PC intact and the immune system response to the infection.
+    -   Analyzing two different ways
+        -   First via the AUC over the first 11 weeks
+        -   2nd is via a linear mixed effects model.
+-   2nd analysis is the dissemination data
+
+
+```{r loaddata}
+
+
+
+
+
+Other.File<-read_excel(path=
+                         "20241217 PC manuscript data_Fig1-5.xlsx",
+                       sheet="Fig. 5")
+
+
+
+
+The.dissem<-openxlsx::read.xlsx(
+  xlsxFile =
+    "20241217 PC manuscript data_Fig1-5.xlsx",
+  fillMergedCells = T,
+  sheet =  "Fig.1B") 
+
+
+
+
+```
+
+
+# Analysis of PC deleted data
+
+## First visualize the data
+
+
+We first visualize the data over the time period we are interested in.
+
+```{r overtime_interesterd, fig.height=10,fig.width=10}
+
+
+Nicer.Names<-read.delim(
+  text = "Peak,Peak viremia
+         Max_ADCP_PCdel,Maximum % ADCP against PC-deleted RhCMV (VID560)
+         Max_ADCP_PCint,Maximum % ADCP against PC-intact RhCMV (VID554R)
+         PCint_ED50_WV,PC-intact whole virion ELISA corrected Prism ED50
+         PCdel_AUC_WV,PC-deleted whole virion ELISA Prism AUC
+         gB_bind_ED50,gB ELISA corrected Prism ED50
+         PC_bind_ED50,PC ELISA corrected Prism ED50
+         Fibro_NT_ED50,PC-intact RhCMV fibroblast neut (corrected Prism log ID50)
+         Epith_NT_ED50,UCD52 RhCMV epithelial neut
+         ADCP_PCint,PC-intact ADCP (% ADCP against VID554R)
+         ADCP_PCdel,PC-deleted ADCP (% ADCP against VID560)
+         cell_assoc_gH,Cell-associated gH IgG binding (%GFP+PE+)", 
+  header =F, 
+  sep = ",") %>%
+  mutate_all(str_squish)
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+# Time data
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---  
+
+ForTimeTo_first<-Other.File %>% 
+  select(`Animal ID`,
+         `Immune status`,
+         Week,
+         AF_detect=`AF+ detection week (chekced by Y: Yes)`) %>% 
+  filter(!is.na(AF_detect)) %>% 
+  group_by(`Animal ID`) %>%
+  arrange(Week) %>% 
+  slice(1) %>% 
+  ungroup()
+
+Project3.4<-Other.File %>% 
+  select(-`Immune status`,
+         -`AF+ detection week (chekced by Y: Yes)`) %>% 
+  rename(AF_status="Transmission Status (Y/N) based on AF+ or fetal tissue+") %>% 
+  filter(Group %in% c(3,4)) %>% 
+  pivot_longer(
+    cols = c(-Group, -`Animal ID`, 
+             -Week,
+             -`VID inoculation`,
+             -AF_status),
+    names_to = "V2",
+    values_to = "value"
+  ) %>% 
+  left_join(Nicer.Names) %>% 
+  filter(!is.na(value)) 
+  
+
+our.week<-unique(Project3.4$Week)
+p1<-Project3.4 %>% 
+  mutate(Group=as.character(Group)) %>% 
+  filter(str_detect(V1,"Max|Peak",negate=T)) %>% 
+  ggplot(aes(x=Week,y=value,col=`VID inoculation`))+
+  geom_point()+
+  geom_line(aes(group=`Animal ID`))+
+  facet_wrap(~V2,scales="free_y",
+             strip.position = "right")+
+  scale_y_log10()+
+  theme_bw()+
+  theme(legend.position = "bottom")+
+  scale_x_continuous(breaks=min(our.week):max(our.week))+
+  ggtitle("Figure: Biomarkers by time between two inoculation groups")
+
+p1
+
+```
+
+
+
+
+
+
+
+
+
+
+## Calculate the AUC
+
+We next calculate the AUC going from week 0 to week 11. 
+
+We are filling in those observations that do not have Week 0/11 values. 
+
+For the week 0 observations, we will project backwards from the first 2 time points to estimate what the week 0 value would be. This was done on the log10 scale. 
+
+```{r no0values, options}
+
+Project3.4 %>% 
+  filter(str_detect(V1,"Max|Peak",negate=T)) %>% 
+  group_by(`Animal ID`,V2) %>% 
+  filter(!any(Week==0)) %>% 
+  select(`Animal ID`,V2,`VID inoculation`) %>% 
+  distinct() %>% 
+  rename("Variable"="V2") %>% 
+  kbl(caption="Table: Instances of no week 0 value") %>% 
+  kable_classic_2(full_width=F)
+  
+  
+  
+
+```
+
+
+Next, are there any instances where there is no week 11 or, no observations post week 11. For these we will just carry forward the week 10 value. 
+
+```{r noweek11, options}
+
+Project3.4 %>% 
+  filter(str_detect(V1,"Max|Peak",negate=T)) %>% 
+  group_by(`Animal ID`,V2) %>% 
+  filter(!any(Week==11)) %>% 
+  filter(!any(Week>11)) %>% 
+  arrange(-Week) %>% slice(1) %>% 
+  select(`Animal ID`,
+         V2,`VID inoculation`,
+         `Last Week`=Week) %>% 
+  distinct() %>% 
+  rename("Variable"="V2") %>% 
+  kbl(caption="Table: Instances of no week 11+ value") %>% 
+  kable_classic_2(full_width=F)
+  
+  
+  
+
+```
+
+
+Finally, there are instances of no week 11 but there are observations pre week 11 and after week 11. Here we simply linearly extrapolated between the two values before and after week 11. This was done on the log10 scale. 
+
+### No week 0 values
+
+Will extrapolate backwards to week 0. 
+
+```{r noweek0visualize, options}
+Project3.4 %>% 
+  filter(str_detect(V1,"Max|Peak",negate=T)) %>% 
+  group_by(`Animal ID`,V2) %>% 
+  filter(!any(Week==0)) %>% 
+  ggplot(aes(x=Week,y=value,col=`Animal ID`))+
+  geom_point()+
+  geom_line(aes(group=`Animal ID`))+
+  facet_wrap(~V1,scales="free_y")+
+  ggtitle("Figure: Data with no week 0 values")+
+  theme_bw()
+  
+```
+
+Let's now zoom in after we've done the linear approximation. 
+
+```{r label, options}
+
+Day0.cond3<-Project3.4 %>% 
+  filter(str_detect(V1,"Max|Peak",negate=T)) %>% 
+  group_by(`Animal ID`,V2,V1,
+           Group,`VID inoculation`,AF_status) %>% 
+  filter(!any(Week==0)) %>% 
+  arrange(Week) %>% 
+  slice(1:2) %>% 
+  summarize(Bio_value=Hmisc::approxExtrap(Week,
+                                          log10(value),
+                                          xout=0)$y,
+                   .groups="drop") %>% 
+  mutate(value=10^Bio_value) %>% 
+  mutate(Week=0) %>% 
+  select(-Bio_value) %>% 
+  mutate(What="Imputed")
+
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+# Next see how that did
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+
+Project3.4 %>% 
+  filter(str_detect(V1,"Max|Peak",negate=T)) %>% 
+  
+  group_by(`Animal ID`,V2) %>% 
+  filter(!any(Week==0)) %>% 
+  arrange(Week) %>% 
+  slice(1:2) %>% 
+  ungroup() %>% 
+  mutate(What="Non-Imputed") %>% 
+  bind_rows(Day0.cond3) %>% 
+  ggplot(aes(x=Week,y=value,col=What))+
+  geom_point()+
+  geom_line(aes(group=`Animal ID`))+
+  facet_grid(V1~`Animal ID`,scales="free_y")+
+  ggtitle("Figure: Data with no week 0 values, imputed backward")+
+  theme_bw()
+
+
+```
+
+
+### No week 11 
+
+If there is no week 11 data but there is say a week 10 and 13 observation, we will linearly extrapolate to the week 11 values. 
+
+```{r noweek11, fig.height=8,fig.width=8}
+
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+# Next the day 11 condition
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+
+Week11.cond3<-Project3.4 %>% 
+  filter(str_detect(V1,"Max|Peak",negate=T)) %>% 
+  group_by(`Animal ID`,V2,V1,Group,`VID inoculation`,AF_status) %>% 
+  filter(!any(Week>=11)) %>% 
+  arrange(-Week) %>% 
+  slice(1) %>% 
+  mutate(Week=11) 
+  
+  
+  
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+# Next the week 11 2
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+HoldIt<-Project3.4 %>% 
+  filter(str_detect(V1,"Max|Peak",negate=T)) %>% 
+  group_by(`Animal ID`,V2) %>%
+  
+  filter(!any(Week==11)) %>% 
+  filter(any(Week>11)) %>% 
+  filter(Week>=0) %>% 
+  group_by(`Animal ID`,V2) %>% 
+  filter(Week<11) %>% 
+  arrange(-Week) %>% 
+  slice(1) %>% 
+  ungroup() %>% 
+  bind_rows(
+    Project3.4 %>%
+      filter(str_detect(V1,"Max|Peak",negate=T)) %>% 
+      group_by(`Animal ID`,V2) %>%
+      filter(!any(Week == 11)) %>%
+      filter(any(Week > 11)) %>%
+      filter(Week >= 0) %>%
+      group_by(`Animal ID`,V2) %>%
+      filter(Week > 11) %>%
+      arrange(Week) %>%
+      slice(1) %>%
+      ungroup()
+  )
+
+
+Week11.cond2<-HoldIt %>% 
+  group_by(`Animal ID`,V2,V1,Group,`VID inoculation`,AF_status) %>% 
+  summarize(Bio_value=Hmisc::approxExtrap(Week,log10(value),xout=11)$y,
+                   .groups="drop") %>% 
+  mutate(value=10^Bio_value) %>% 
+  mutate(Week=11)
+
+
+Week11.cond2 %>% 
+  mutate(What="Imputed") %>% 
+  bind_rows(
+    HoldIt %>% 
+      mutate(What="actual")
+  ) %>% 
+  ggplot(aes(x=Week,
+             y=value,col=What))+
+  
+  geom_line(aes(group=`Animal ID`),col="black")+
+  geom_point()+
+  theme_bw()+
+  theme(legend.position = "bottom")+
+  facet_wrap(~V2,scales="free",nrow=3,ncol=3)+
+  scale_y_log10()+
+  ggtitle("Figure: Week 11 Linearly extrapolating.")
+  
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+# Next we calculate the AUC values
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+
+
+
+
+Data.AUC<-Project3.4 %>% 
+  bind_rows(Day0.cond3) %>% 
+  bind_rows(Week11.cond2) %>% 
+  bind_rows(Week11.cond3) %>% 
+  filter(str_detect(V1,"Max|Peak",negate=T)) %>% 
+  group_by(`Animal ID`,V2) %>% 
+  filter(Week>=0) %>% 
+  filter(Week<=11) %>% 
+  group_by(`Animal ID`,V2,V1,Group,`VID inoculation`,AF_status) %>% 
+  summarize(AUC=DescTools::AUC(x=Week,
+                    y=value,
+                    method = "trapezoid"),
+            .groups="drop")
+
+```
+
+
+## Analyze the AUC/Max data
+
+We will next analyze the AUC/Max data. This was done using a Wilcoxon Rank Sum Test via the coin package which calculates the exact p-value. The exact p-value is based on all the possible permutations given the data and the group size. 
+
+```{r analyze the AUC, fig.height=8,fig.width=8,results='asis'}
+
+
+ForAnalyzing<-Data.AUC %>% 
+  bind_rows(Project3.4 %>% 
+              filter(str_detect(V1,"Max|Peak",negate=F)) %>% 
+              rename(AUC=value) %>% 
+              select(-Week) 
+              ) 
+
+
+ForAnalyzing %>% 
+  ggplot(aes(x=`VID inoculation`,
+             y=AUC,col=`VID inoculation`))+
+  geom_boxplot(outlier.shape =NA)+
+  geom_point(position=position_jitter(seed=41,0.1))+
+  facet_wrap(~V1,scales="free_y")+
+  scale_y_log10()+
+  theme_bw()+
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle("Figure: AUC (or Peak/Max) by VID inoculation for each variables")+
+  ylab("AUC or Peak/Max")
+
+Our.Results<-ForAnalyzing %>% 
+  mutate(`VID inoculation`=as.factor(`VID inoculation`)) %>% 
+  group_by(V2) %>% 
+  summarize(P.value=coin::pvalue(coin::wilcox_test(AUC~`VID inoculation`,
+                                                   distribution=exact()))[1],
+            .groups="drop") %>% 
+  mutate(FDR_Pvalue=p.adjust(P.value,"BH")) %>% 
+  arrange(P.value,FDR_Pvalue) %>% 
+  mutate(IsFDR=ifelse(P.value<=0.05 & FDR_Pvalue<=0.2,
+                      T,F))
+  
+Our.Results %>% 
+  mutate(across(c(P.value,FDR_Pvalue),
+                ~signif(.,digits=3))) %>% 
+  mutate(across(c(P.value,FDR_Pvalue,V2),
+                  ~cell_spec(.,
+                             bold=ifelse(IsFDR,
+                                         T,F)))) %>% 
+  rename(Variable=V2,
+         `Pvalue`=P.value,
+         `FDR Pvalue`=FDR_Pvalue) %>% 
+  select(-IsFDR) %>% 
+  kbl(escape=F,
+        caption="Table: Results from AUC Analysis") %>% 
+  kable_classic_2(full_width=F) %>% 
+  add_footnote(c("<b>Bold</b> indicates P-value <0.05 and FDR p-value <0.2",
+               "Pvalues from Wilcoxon Rank Sum Test",
+               "FDR Pvalue from Benjamini Hochberg"),
+               notation = "none",escape=F, threeparttable = TRUE)
+
+
+
+
+```
+
+
+We see a few variables that come back as significant. 
+
+
+## Linear mixed effects model 
+
+We next performed a longitudinal model analyzing the whole time course (not restricting to the first 11 weeks). We are testing for any difference across time with regards to the virus inoculated with. 
+
+We ran this two different ways. In the data without any lower limit of detection issues we used the lme4 package, fitting a linear mixed effects model with a random intercept for animal ID. We allowed for a fixed effect for time and Virus. Upon examining the residuals of the data (which can be seen in the appendix), we in addition added an early period effect (prior to week 3). This was done for all variables. Censored linear mixed effects models were fit using the lmec package in R. Multiple testing correction was done as above via FDR. 
+
+
+The final model was then: 
+
+$$ Y=\alpha_0+\alpha_1\text{(Mutant Virus)}+\alpha_2\text{Week}+\alpha_3\text{(Before Week 3)}+\text{(Random intercept for Animal)}+\text{Noise}$$
+
+### The variables without any censored data
+
+First we will run on the data that has no data at lower limit.
+
+```{r lmerADCP_PCIntact, fig.height=7,fig.width=7}
+
+
+ToUse<-str_subset(unique(Project3.4$V1),"Max|Peak",negate=T)
+
+All.lme.results<-vector(mode="list",length=length(ToUse))
+
+names(All.lme.results)<-ToUse
+
+
+Vars.no.limit<-str_subset(ToUse,"ADCP|AUC|cell_assoc")
+
+Name1<-"ADCP_PCint"
+
+
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+# Running now over in a loop to get the results want
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+
+for(j in seq_along(Vars.no.limit)){
+  
+  Name1<-Vars.no.limit[j]
+  
+  FinFinAnalysis<-Project3.4 %>% 
+       filter(V1==Name1) %>% 
+       mutate(BB=ifelse(str_detect(V1,"AUC",negate=T),
+                        log(value/100)-log(1-value/100),
+                        log10(value))) %>% 
+       mutate(ID=`Animal ID`) %>% 
+       mutate(Virus=`VID inoculation`) %>%
+    mutate(Period = ifelse(Week < 3, 1, 0)) %>% 
+    arrange(ID,Week)
+  #--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+  # Next run the regression
+  #--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+  
+  
+  A1 <- lmer(BB ~ Week + Period + Virus + (1 | ID),
+             data = FinFinAnalysis)
+  
+  TheResults.1 <- summary(A1)$coefficients %>% 
+    as.data.frame() %>%
+    rownames_to_column("Variable") %>% 
+    filter(str_detect(Variable,"Virus")) 
+    
+  
+  All.lme.results[[Name1]] <- TheResults.1 %>%
+    select(Estimate,
+           SE = `Std. Error`,
+           df,
+           the.test = `t value`,
+           Pvalue = `Pr(>|t|)`) %>%
+    mutate(How = "lmer") %>%
+    mutate(What = Name1)
+
+
+
+
+ 
+  
+}
+
+
+
+
+
+
+```
+
+
+
+
+
+### Variables that are at a lower bound.
+
+For these we used a linear mixed effects model that allows for censoring. 
+
+
+```{r gB_bind_ED50_lmec, fig.height=7,fig.width=7}
+
+
+Variables.with.limit<-sort(setdiff(ToUse,Vars.no.limit))
+
+
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+# Seed set for starting value
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+set.seed(515159)
+
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+# Next create the lmec function
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+
+my.lmec.func <- function(x, is.intersect = T) {
+  
+  Our.model <- model.matrix( ~ Virus + Week + Period, data = x)
+  Our.model.0 <- model.matrix( ~  Week + Period, data = x)
+  if (is.intersect) {
+    
+  Our.model <- model.matrix( ~ Virus + Week * Period, data = x)
+  
+  Our.model.0 <- model.matrix( ~  Week * Period, data = x)
+  
+  }
+  
+  Trash <- capture.output(
+    GetIt <- lmec(
+      yL = x$BB,
+      cens = x$CC,
+      X = Our.model,
+      Z = matrix(1, nrow = nrow(x), ncol = 1),
+      cluster = x$O.plate,
+      method = 'ML',
+      maxstep = 1000
+    )
+  )
+  Trash <- capture.output(
+    GetIt.0 <- lmec(
+      yL = x$BB,
+      cens = x$CC,
+      X = Our.model.0,
+      Z = matrix(1, nrow = nrow(x), ncol = 1),
+      cluster = x$O.plate,
+      method = 'ML',
+      maxstep = 1000
+    )
+  )
+  Converge1 <- GetIt$step < 1000
+  Converge0 <- GetIt.0$step < 1000
+  
+
+  TheResults.1 <- data.frame(
+    Estimate = GetIt$beta,
+    Variable = colnames(GetIt$varFix),
+    df = NA,
+    SE = sqrt(diag(GetIt$varFix))) %>%
+    filter(str_detect(Variable, "Virus")) %>%
+    mutate(the.test = Estimate / SE) %>%
+    mutate(Pvalue = pnorm(abs(the.test), lower.tail = F) * 2,
+           Log.like.test = (-2 * (GetIt.0$loglik - GetIt$loglik)))
+  
+  return(list(TheResults.1,
+              c(Converge1,Converge0)))
+  
+}
+
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+# Now let's loop through
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---  
+df_convergence<-vector(
+  mode="list",
+  length=length(Variables.with.limit)
+  )
+for(k in seq_along(Variables.with.limit)){
+  
+  Name1<-Variables.with.limit[k]
+  
+  
+  
+  FinFinAnalysis <- Project3.4 %>%
+    filter(V1 == Name1) %>%
+    mutate(BB = log10(value)) %>%
+    mutate(ID = `Animal ID`) %>%
+    mutate(Virus = `VID inoculation`) %>%
+    mutate(Period = ifelse(Week < 3, 1, 0)) %>%
+    mutate(O.plate = 
+             fct_anon(as.factor(`Animal ID`))) %>%
+    arrange(O.plate, Week) %>%
+    mutate(O.plate = 
+             parse_number(as.character(O.plate))) %>%
+    mutate(CC = ifelse(BB == min(BB), 1, 0)) %>% 
+    arrange(O.plate,Week)
+  
+
+  
+  
+  lmec_results <- my.lmec.func(
+    x = FinFinAnalysis, 
+    is.intersect = F)
+  Converge1 <- lmec_results[[2]][1]
+  Converge2 <- lmec_results[[2]][2]
+  
+  
+  All.lme.results[[Name1]] <- lmec_results[[1]] %>%
+    mutate(How = "lmec") %>%
+    mutate(What = Name1)
+  
+  df_convergence[[k]] <- data.frame(Name1, 
+                                    Converge1, 
+                                    Converge2)
+}
+
+
+
+
+```
+
+
+
+
+### The Results
+
+```{r TheResults_linear_mixed_effect_model, options}
+
+Our.Results<-All.lme.results %>% 
+  bind_rows() %>% 
+  select(-Variable) %>% 
+  remove_rownames() %>% 
+  ungroup() %>% 
+  mutate(FDR.pvalue=p.adjust(Pvalue,"BH")) %>% 
+  mutate(IsFDR=ifelse(Pvalue<=0.05 & FDR.pvalue<=0.2,
+                      T,F)) %>% 
+  arrange(Pvalue,FDR.pvalue) %>% 
+  
+  mutate(across(where(is.numeric),formatC,digits=3)) %>% 
+  rename(V1=What) %>% 
+  left_join(Nicer.Names) %>% 
+  select(V2,How,Estimate,SE,Pvalue,FDR.pvalue,IsFDR) 
+
+
+Our.Results %>% 
+  mutate(Variable=paste0(V2,
+                         ifelse(How=="lmec","*",
+                                ""))) %>% 
+    mutate(across(c(Pvalue,FDR.pvalue,Variable,Estimate),
+                  ~cell_spec(.,
+                             bold=ifelse(IsFDR,
+                                         T,F)))) %>% 
+  select(-V2,-How,-IsFDR) %>% 
+  select(Variable,everything()) %>% 
+  rename("WT vs PC deleted"="Estimate") %>% 
+  kbl(caption="Table: Results from linear mixed effects model",
+        escape = F) %>% 
+  kable_classic_2(full_width=F) %>% 
+  add_footnote(c("* indicate results from linear effects model with censored data (i.e. accounting for data at lower bound)",
+               "<b>Bold</b> indicates P-value <0.05 and FDR p-value <0.2",
+               "ADCP and Cell-associated gH IgG binding were logit transformed"),
+               notation = "none",escape = F)
+
+
+```
+
+
+#### What was called significant?
+
+```{r whatcalledsign, fig.height=8,fig.width=8}
+All.lme.results %>% bind_rows() %>% 
+  select(-Variable) %>% 
+  remove_rownames() %>% 
+  ungroup() %>% 
+  mutate(FDR.pvalue=p.adjust(Pvalue,"BH")) %>% 
+  filter(Pvalue<0.05 & FDR.pvalue<0.2) %>% 
+  select(V1=What) %>% 
+  left_join(Project3.4) %>% 
+  ggplot(aes(x=Week,y=value,col=`VID inoculation`))+
+  geom_point()+
+  geom_line(aes(group=`Animal ID`))+
+  facet_wrap(~V2,scales="free_y",
+             strip.position = "top",ncol=2)+
+  scale_y_log10()+
+  theme_bw()+
+  theme(legend.position = "bottom")+
+  scale_x_continuous(breaks=min(our.week):max(our.week))+
+  ggtitle("Figure: Significant results from linear mixed effects model ")
+
+```
+
+
+#### What was not called significant
+
+```{r whatnotsig, fig.height=8,fig.width=8}
+All.lme.results %>% bind_rows() %>% 
+  select(-Variable) %>% 
+  remove_rownames() %>% 
+  ungroup() %>% 
+  mutate(FDR.pvalue=p.adjust(Pvalue,"BH")) %>% 
+  filter(Pvalue>0.05| FDR.pvalue>0.2) %>% 
+  select(V1=What) %>% 
+  left_join(Project3.4) %>% 
+  ggplot(aes(x=Week,y=value,col=`VID inoculation`))+
+  geom_point()+
+  geom_line(aes(group=`Animal ID`))+
+  facet_wrap(~V2,scales="free_y",strip.position = "top",nrow=3)+
+  scale_y_log10()+
+  theme_bw()+
+  theme(legend.position = "bottom")+
+  scale_x_continuous(breaks=min(our.week):max(our.week))+
+  ggtitle("Figure: Non-Significant results from linear mixed effects model")
+```
+
+
+
+
+# AUC and Amniotic fluid   
+
+Here we look at the AUC calculated above and whether or not it is associated with transmission status via Wilcoxon rank sum test. 
+
+
+
+```{r analyzeAUC_AF, fig.height=10,fig.width=10}
+
+
+
+Our.Results<-ForAnalyzing %>% 
+  mutate(`AF_status`=as.factor(`AF_status`)) %>% 
+  group_by(V2) %>% 
+  summarize(P.value=coin::pvalue(coin::wilcox_test(AUC~`AF_status`,
+                                                   distribution=exact()))[1],
+            .groups="drop") %>% 
+  mutate(FDR_Pvalue=p.adjust(P.value,"BH")) %>% 
+  arrange(P.value,FDR_Pvalue) %>% 
+  mutate(IsFDR=ifelse(P.value<=0.05 & FDR_Pvalue<=0.2,
+                      T,F))
+  
+
+
+
+Our.Results %>% 
+  mutate(across(c(P.value,FDR_Pvalue),
+                ~signif(.,digits=3))) %>% 
+  mutate(across(c(P.value,FDR_Pvalue,V2),
+                  ~cell_spec(.,
+                             bold=ifelse(IsFDR,
+                                         T,F)))) %>% 
+  rename(Variable=V2,
+         `Pvalue`=P.value,
+         `FDR Pvalue`=FDR_Pvalue) %>% 
+  select(-IsFDR) %>% 
+  kbl(escape=F,
+        caption="Table: Results from AUC Analysis of virus in the Amniotic Fluid") %>% 
+  kable_classic_2(full_width=F) %>% 
+  add_footnote(c("<b>Bold</b> indicates P-value <0.05 and FDR p-value <0.2",
+               "Pvalues from Wilcoxon Rank Sum Test",
+               "FDR Pvalue from Benjamini Hochberg"),
+               notation = "none",escape=F, threeparttable = TRUE)
+
+
+```
+
+
+
+# Dissemination data
+
+Next we look at the dissemination data. For these analyses we removed the draining lymph nodes and the injection sites tissues from the analysis. 
+
+*   RhCMV.FL.ΔRh157.4-.5-> as PC deleted
+*   RhCMV.FL.ΔRh158-161-> as UL146 
+
+
+
+```{r disseminate, options}
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+# Get new names that have the animal and the virus condition
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+The.dissem.new.names<-paste0(colnames(The.dissem),"__",
+                        unlist(The.dissem[1,]))
+The.dissem.new.names[1:2]<-unlist(The.dissem[1,])[1:2]
+
+colnames(The.dissem)<-The.dissem.new.names
+
+
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+# drop the first row and the draining LN/Injection Site
+#--- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
+The.dissem.pivoted<-The.dissem %>% 
+  remove_rownames() %>%  
+  slice(-1) %>% 
+  filter(str_detect(System,"Draining LN",negate=T)) %>% 
+  filter(str_detect(System,"Injection Site",negate=T)) %>% 
+  pivot_longer(cols=c(-System,-Tissue)) %>% 
+  mutate(Condition=str_split_fixed(name,"__",2)[,1],
+         Animal.ID=str_split_fixed(name,"__",2)[,2]) %>% 
+  mutate(Condition=recode(Condition,
+                          `dd-RhCMV.FL`="DD",
+                          `RhCMV.FL`="WT",
+                          `RhCMV.FL.ΔRh157.4-.5.RhCMV.FL.ΔRh157.4-.5.RhCMV.FL.ΔRh157.4-.5`="PCdel",
+                          `RhCMV.FL.ΔRh158-161`="UL146")) %>% 
+  mutate(value=parse_number(value))
+
+```
+
+
+## Acounting for data from the Animal. 
+
+We next visualize the ratio of the mutant virus count to the wild type virus count (after adding 1 to both to account for 0's) from the same tissue and the same animal. 
+
+
+```{r FromSameanimal, options}
+
+compared_2_wt<-The.dissem.pivoted %>% 
+  filter(str_detect(Condition,"FL-RhCMV")) %>% 
+  rename(WT_value=value) %>% 
+  select(-name) %>% 
+  full_join(
+    The.dissem.pivoted %>%
+      filter(str_detect(Condition, "FL-RhCMV",negate=T)) %>%
+      rename(MT_condition = Condition) %>%
+      select(-name)
+  ) %>% 
+  filter(!is.na(WT_value) & !is.na(value)) 
+
+compared_2_wt %>% 
+  ggplot(aes(x=MT_condition,y=(value+1)/(WT_value+1)))+
+  geom_boxplot(outlier.shape=NA)+
+  geom_point(position=position_jitter(0.1,seed=1))+
+  theme_bw()+
+  scale_y_log10()+
+  geom_hline(yintercept=1)+
+  ggtitle("(Mutant Virus Count+1)/(Wild Type Virus Count+1)")+
+  ylab("Ratio") +
+  xlab("Mutant Condition")
+  
+
+
+```
+
+
+
+## Linear mixed effects model 
+
+
+Restricting to data where have observations in both tissues. No longer dropping the Genitorurinary Tract. 
+
+
+We will model the log10 ratio. The ratio is Mutant Virus count + 1 divided by Wild Type Virus count + 1. We have a random intercept for animal and are testing for whether or not log10 of this ratio is different than 1. We will include as covariate "system" type. We are not adjusting for sex. 
+
+
+
+```{r modelthediff, echo=F,fig.height=6,fig.width=8}
+
+
+
+
+TheResults.ratio.part2<-lmer(NewRatio~-1+MT_condition+System+
+                         (1|Animal.ID),
+                 data=compared_2_wt %>% 
+                   mutate(NewRatio=log10(value+1)-
+                            log10(WT_value+1)) %>% 
+                   ungroup() )
+
+Our.contest<-matrix(c(1,0,0,rep(0,5),
+                      0,1,0,rep(0,5),
+                      0,0,1,rep(0,5),
+                      1,-1,0,rep(0,5),
+                      1,0,-1,rep(0,5),
+                      0,1,-1,rep(0,5)),
+                    nrow=6,ncol=8,
+                    byrow = T)
+
+WhatAreTheNames<-colnames(TheResults.ratio.part2@vcov_beta)[1:3] %>% 
+  str_remove_all(pattern="MT_condition")
+  
+Our.pvalues<-contest(TheResults.ratio.part2,
+                     Our.contest,
+        rhs = 0,
+        joint = FALSE,
+        collect = T,
+        confint = T,
+        level = 0.95,
+        check_estimability = T,
+        ddf = c("Satterthwaite")) %>%
+  mutate(Comparison = c(
+    paste(WhatAreTheNames, "vs", "WT"),
+    paste(WhatAreTheNames[1],
+          "vs",
+          WhatAreTheNames[2]),
+    paste(WhatAreTheNames[1],
+          "vs",
+          WhatAreTheNames[3]),
+    paste(WhatAreTheNames[2],
+          "vs", WhatAreTheNames[3])
+  )) %>%
+  select(Comparison,
+         Estimate,
+         test_statistic=`t value`,
+         Pvalue=`Pr(>|t|)`) %>% 
+  mutate(HolmAdjustedPvalue=p.adjust(Pvalue)) %>% 
+  mutate(across(where(is.numeric),
+                formatC,digits=3)) %>% 
+  mutate(Comparison=ifelse(str_detect(Comparison,
+                                      "WT"),
+                           Comparison,
+                           paste0(Comparison,"*")))
+
+Our.pvalues %>% 
+  kbl(caption="Results from linear mixed effects model of log fold change MT vs WT") %>% 
+  kable_classic_2(full_width=F) %>% 
+  add_footnote(c("* indicates a comparison of MT condition 1 normalized to their WT vs MT condition 2 normalized to their WT"),notation = "none")
+  
+```
+
+After normalizing UL146 to its wild type we do not have evidence of a statistically significant difference to PC deleted normalized to its wild type. I.e. they are no more different from their wild type than the other mutant type. We see something similar for UL146 and DD. After normalizing DD to its wild type we do have evidence of a statistica
+
+
+# Session Info
+
+```{r sessioninfo}
+sessionInfo()
+```
